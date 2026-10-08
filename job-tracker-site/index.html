@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Job Dashboard</title>
+<style>
+:root{--bg:#0f141a;--card:#161d26;--line:#263040;--text:#e8edf3;--mute:#8a98a8;--accent:#7cc4e8;--bad:#f08a7a;--good:#7bd6a0}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,sans-serif}
+nav{display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg)}
+nav a{color:var(--mute);text-decoration:none;padding:6px 14px;border-radius:999px}
+nav a.active{background:#fff;color:#111;font-weight:600}
+nav .sp{flex:1}
+main{max-width:980px;margin:0 auto;padding:20px 16px 60px}
+h1{margin:.2em 0}
+.sub{color:var(--mute)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:16px 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.card .k{font-size:12px;letter-spacing:.06em;color:var(--mute);text-transform:uppercase}
+.card .v{font-size:30px;font-weight:700}
+.card .n{color:var(--mute);font-size:13px}
+.card a{color:var(--accent);text-decoration:none}
+table{width:100%;border-collapse:collapse;margin-top:12px}
+th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line)}
+th{color:var(--mute);font-weight:500;font-size:13px}
+form{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+input,select,button{background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font:inherit}
+button{cursor:pointer;background:var(--accent);color:#08202e;border:0;font-weight:600}
+button.ghost{background:none;color:var(--mute);border:1px solid var(--line)}
+.bar{height:8px;background:var(--line);border-radius:4px;overflow:hidden;margin-top:6px}
+.bar i{display:block;height:100%;background:var(--accent)}
+.tl{border-left:2px solid var(--line);margin-left:8px;padding-left:16px}
+.tl div{margin:0 0 14px;position:relative}
+.tl div:before{content:"";position:absolute;left:-23px;top:6px;width:10px;height:10px;border-radius:50%;background:var(--accent)}
+</style>
+</head>
+<body>
+<nav id="nav"></nav>
+<main id="view"></main>
+
+<script>
+/* ---------- shared store: every tab reads/writes the same data ---------- */
+const KEY = "jobtracker.v1";
+const LANGS = {nl: "Nederlands", fr: "Français", en: "English"};
+const STATUSES = ["applied", "invited", "round 2-5", "offer", "rejected", "no reply"];
+const store = {
+  data: JSON.parse(localStorage.getItem(KEY) || '{"apps":[],"sessions":[],"events":[]}'),
+  save(){ localStorage.setItem(KEY, JSON.stringify(this.data)); },
+  add(list, item){ this.data[list].push({id: Date.now(), date: new Date().toISOString().slice(0,10), ...item}); this.save(); },
+  del(list, id){ this.data[list] = this.data[list].filter(x => x.id !== id); this.save(); }
+};
+
+/* ---------- derived performance numbers (the dashboard reads these) ---------- */
+function stats(){
+  const a = store.data.apps, n = a.length;
+  const invited = a.filter(x => ["invited","round 2-5","offer"].includes(x.status)).length;
+  const rounds = a.filter(x => ["round 2-5","offer"].includes(x.status)).length;
+  const offers = a.filter(x => x.status === "offer").length;
+  const pct = (x, y) => y ? Math.round(100 * x / y) + "%" : "–";
+  const lang = {};
+  for (const l in LANGS){
+    const s = store.data.sessions.filter(x => x.lang === l);
+    const mins = s.reduce((t, x) => t + x.minutes, 0);
+    const avg = s.length ? (s.reduce((t, x) => t + x.score, 0) / s.length).toFixed(1) : "–";
+    const last5 = s.slice(-5), prev5 = s.slice(-10, -5);
+    const m = r => r.length ? r.reduce((t, x) => t + x.score, 0) / r.length : null;
+    const trend = (m(last5) != null && m(prev5) != null) ? (m(last5) - m(prev5)).toFixed(1) : null;
+    lang[l] = {count: s.length, mins, avg, trend};
+  }
+  return {n, invited, rounds, offers, inviteRate: pct(invited, n), lang};
+}
+
+/* ---------- tabs: hash routing, no new browser tabs ---------- */
+const TABS = [["dash","Job dashboard"], ["nl","Nederlands"], ["fr","Français"], ["en","English"], ["apps","Applications"], ["map","Carte de parcours"]];
+function nav(cur){
+  document.getElementById("nav").innerHTML = TABS.map(([id, label]) =>
+    `<a href="#${id}" class="${id === cur ? "active" : ""}">${label}</a>`).join("") +
+    `<span class="sp"></span><button class="ghost" onclick="exportData()">Export</button>
+     <button class="ghost" onclick="document.getElementById('imp').click()">Import</button>
+     <input id="imp" type="file" accept=".json" hidden onchange="importData(this)">`;
+}
+function exportData(){
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(store.data, null, 2)], {type: "application/json"}));
+  a.download = "job-tracker.json"; a.click();
+}
+function importData(el){
+  const f = el.files[0]; if (!f) return;
+  f.text().then(t => { store.data = JSON.parse(t); store.save(); render(); });
+}
+
+const card = (k, v, n, href) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div><div class="n">${n}${href ? ` · <a href="${href}">details →</a>` : ""}</div></div>`;
+
+/* ---------- views ---------- */
+const views = {
+  dash(){
+    const s = stats();
+    const langCards = Object.entries(LANGS).map(([l, name]) => {
+      const x = s.lang[l], t = x.trend == null ? "" : ` · trend ${x.trend > 0 ? "+" : ""}${x.trend}`;
+      const w = x.avg === "–" ? 0 : x.avg * 20;
+      return `<div class="card"><div class="k">${name}</div><div class="v">${x.avg}<span class="sub" style="font-size:14px"> / 5</span></div>
+        <div class="n">${x.count} sessions · ${x.mins} min${t} · <a href="#${l}">open tracker →</a></div><div class="bar"><i style="width:${w}%"></i></div></div>`;
+    }).join("");
+    return `<div class="sub">JOB SEARCH</div><h1>Job dashboard</h1>
+      <p class="sub">Every number here comes from the other tabs. Log something there and it changes here.</p>
+      <div class="grid">
+        ${card("Applications", s.n, "tracked", "#apps")}
+        ${card("Invitations", s.invited, `${s.inviteRate} of applications`, "#apps")}
+        ${card("Round 2–5", s.rounds, "processes", "#apps")}
+        ${card("Offers", s.offers, "received", "#apps")}
+      </div>
+      <h3>Language performance</h3><div class="grid">${langCards}</div>`;
+  },
+  apps(){
+    const rows = store.data.apps.slice().reverse().map(a => `<tr><td>${a.date}</td><td>${esc(a.company)}</td><td>${esc(a.role||"")}</td>
+      <td><select onchange="setStatus(${a.id}, this.value)">${STATUSES.map(s => `<option ${s===a.status?"selected":""}>${s}</option>`).join("")}</select></td>
+      <td><button class="ghost" onclick="del('apps',${a.id})">✕</button></td></tr>`).join("");
+    return `<h1>Applications</h1>
+      <form onsubmit="return addApp(this)"><input name="company" placeholder="Company" required><input name="role" placeholder="Role">
+        <select name="status">${STATUSES.map(s=>`<option>${s}</option>`).join("")}</select><button>Add</button></form>
+      <table><tr><th>Date</th><th>Company</th><th>Role</th><th>Status</th><th></th></tr>${rows}</table>`;
+  },
+  lang(l){
+    const x = stats().lang[l];
+    const rows = store.data.sessions.filter(s => s.lang === l).reverse().map(s =>
+      `<tr><td>${s.date}</td><td>${s.type}</td><td>${s.minutes} min</td><td>${s.score}/5</td><td>${esc(s.note||"")}</td>
+       <td><button class="ghost" onclick="del('sessions',${s.id})">✕</button></td></tr>`).join("");
+    return `<h1>${LANGS[l]}</h1>
+      <div class="grid">${card("Sessions", x.count, "logged")}${card("Practice time", x.mins, "minutes")}${card("Average", x.avg, "self-score out of 5")}</div>
+      <form onsubmit="return addSession(this,'${l}')">
+        <select name="type"><option>call</option><option>interview</option><option>speaking</option><option>writing</option><option>listening</option></select>
+        <input name="minutes" type="number" min="1" placeholder="Minutes" required style="width:100px">
+        <select name="score">${[1,2,3,4,5].map(n=>`<option>${n}</option>`).join("")}</select>
+        <input name="note" placeholder="What went wrong / well?" style="flex:1"><button>Log</button></form>
+      <table><tr><th>Date</th><th>Type</th><th>Time</th><th>Score</th><th>Note</th><th></th></tr>${rows}</table>`;
+  },
+  map(){
+    const evs = [...store.data.events, ...store.data.apps.map(a => ({date: a.date, text: `${a.company}: ${a.status}`}))]
+      .sort((a, b) => a.date.localeCompare(b.date));
+    return `<h1>Carte de parcours</h1><p class="sub">Your timeline. Applications appear automatically.</p>
+      <form onsubmit="return addEvent(this)"><input name="text" placeholder="Milestone" required style="flex:1"><input name="date" type="date"><button>Add</button></form>
+      <div class="tl">${evs.map(e => `<div><b>${e.date}</b> — ${esc(e.text)}</div>`).join("")}</div>`;
+  }
+};
+
+/* ---------- actions ---------- */
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+function addApp(f){ store.add("apps", {company: f.company.value, role: f.role.value, status: f.status.value}); render(); return false; }
+function addSession(f, lang){ store.add("sessions", {lang, type: f.type.value, minutes: +f.minutes.value, score: +f.score.value, note: f.note.value}); render(); return false; }
+function addEvent(f){ const e = {text: f.text.value}; if (f.date.value) e.date = f.date.value; store.add("events", e); render(); return false; }
+function setStatus(id, s){ store.data.apps.find(a => a.id === id).status = s; store.save(); }
+function del(list, id){ store.del(list, id); render(); }
+
+function render(){
+  const cur = location.hash.slice(1) || "dash";
+  nav(cur);
+  document.getElementById("view").innerHTML = LANGS[cur] ? views.lang(cur) : (views[cur] || views.dash)();
+}
+addEventListener("hashchange", render);
+render();
+</script>
+</body>
+</html>
