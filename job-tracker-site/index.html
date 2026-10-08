@@ -44,12 +44,50 @@ button.ghost{background:none;color:var(--mute);border:1px solid var(--line)}
 const KEY = "jobtracker.v1";
 const LANGS = {nl: "Nederlands", fr: "Français", en: "English"};
 const STATUSES = ["applied", "invited", "round 2-5", "offer", "rejected", "no reply"];
+/* mode: "local"  = no server reachable (opened as a file) -> edit, saved in this browser only
+         "viewer" = online, anyone with the link -> read only, refreshes every 30 s
+         "editor" = online + correct edit key -> changes saved for everyone */
+const API = "/api/data";
+const local = {
+  get(k){ try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v){ try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} }
+};
 const store = {
-  data: JSON.parse(localStorage.getItem(KEY) || '{"apps":[],"sessions":[],"events":[]}'),
-  save(){ localStorage.setItem(KEY, JSON.stringify(this.data)); },
+  data: JSON.parse(local.get(KEY) || '{"apps":[],"sessions":[],"events":[]}'),
+  rev: 0, mode: "local", key: local.get(KEY + ".key") || "",
+  get canEdit(){ return this.mode !== "viewer"; },
+  async load(){
+    try {
+      const r = await fetch(API, {headers: {"x-edit-key": this.key}, cache: "no-store"});
+      if (!r.ok) throw 0;
+      const j = await r.json();
+      this.data = j.data; this.rev = j.rev; this.mode = j.editor ? "editor" : "viewer";
+      if (!j.editor && this.key){ this.key = ""; local.set(KEY + ".key", null); }
+      local.set(KEY, JSON.stringify(this.data));
+    } catch { this.mode = "local"; }
+  },
+  async save(){
+    local.set(KEY, JSON.stringify(this.data));
+    if (this.mode !== "editor") return;
+    status("Saving…");
+    const r = await fetch(API, {method: "PUT", headers: {"content-type": "application/json", "x-edit-key": this.key},
+      body: JSON.stringify({rev: this.rev, data: this.data})}).catch(() => null);
+    if (r && r.ok){ this.rev = (await r.json()).rev; status("Saved online"); return; }
+    if (r && r.status === 409){ alert("Changed on another device. Reloading the latest version — redo your last change."); }
+    else alert("Could not save online. Your change is kept in this browser only.");
+    await this.load(); render();
+  },
   add(list, item){ this.data[list].push({id: Date.now(), date: new Date().toISOString().slice(0,10), ...item}); this.save(); },
   del(list, id){ this.data[list] = this.data[list].filter(x => x.id !== id); this.save(); }
 };
+function status(t){ const el = document.getElementById("status"); if (el) el.textContent = t; }
+async function unlock(){
+  const k = prompt("Edit key (the EDIT_KEY you set in Netlify):"); if (!k) return;
+  store.key = k; local.set(KEY + ".key", k); await store.load();
+  if (store.mode !== "editor") alert("Wrong key — still view only.");
+  render();
+}
+function lock(){ store.key = ""; local.set(KEY + ".key", null); store.mode = "viewer"; render(); }
 
 /* ---------- derived performance numbers (the dashboard reads these) ---------- */
 function stats(){
@@ -76,9 +114,13 @@ const TABS = [["dash","Job dashboard"], ["nl","Nederlands"], ["fr","Français"],
 function nav(cur){
   document.getElementById("nav").innerHTML = TABS.map(([id, label]) =>
     `<a href="#${id}" class="${id === cur ? "active" : ""}">${label}</a>`).join("") +
-    `<span class="sp"></span><button class="ghost" onclick="exportData()">Export</button>
-     <button class="ghost" onclick="document.getElementById('imp').click()">Import</button>
-     <input id="imp" type="file" accept=".json" hidden onchange="importData(this)">`;
+    `<span class="sp"></span><span id="status" class="sub" style="font-size:13px">${
+      {local: "Offline: saved in this browser", viewer: "View only · live", editor: "Editing · synced"}[store.mode]}</span>
+     ${store.mode === "viewer" ? `<button class="ghost" onclick="unlock()">Unlock editing</button>` : ""}
+     ${store.mode === "editor" ? `<button class="ghost" onclick="lock()">Lock</button>` : ""}
+     <button class="ghost" onclick="exportData()">Export</button>
+     ${store.canEdit ? `<button class="ghost" onclick="document.getElementById('imp').click()">Import</button>
+     <input id="imp" type="file" accept=".json" hidden onchange="importData(this)">` : ""}`;
 }
 function exportData(){
   const a = document.createElement("a");
@@ -87,7 +129,11 @@ function exportData(){
 }
 function importData(el){
   const f = el.files[0]; if (!f) return;
-  f.text().then(t => { store.data = JSON.parse(t); store.save(); render(); });
+  f.text().then(t => {
+    const d = JSON.parse(t);
+    if (!["apps","sessions","events"].every(k => Array.isArray(d[k]))) return alert("Not a job-tracker export file.");
+    store.data = d; store.save(); render();
+  });
 }
 
 const card = (k, v, n, href) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div><div class="n">${n}${href ? ` · <a href="${href}">details →</a>` : ""}</div></div>`;
@@ -114,32 +160,32 @@ const views = {
   },
   apps(){
     const rows = store.data.apps.slice().reverse().map(a => `<tr><td>${a.date}</td><td>${esc(a.company)}</td><td>${esc(a.role||"")}</td>
-      <td><select onchange="setStatus(${a.id}, this.value)">${STATUSES.map(s => `<option ${s===a.status?"selected":""}>${s}</option>`).join("")}</select></td>
-      <td><button class="ghost" onclick="del('apps',${a.id})">✕</button></td></tr>`).join("");
+      <td><select ${store.canEdit?"":"disabled"} onchange="setStatus(${a.id}, this.value)">${STATUSES.map(s => `<option ${s===a.status?"selected":""}>${s}</option>`).join("")}</select></td>
+      <td>${store.canEdit?`<button class="ghost" onclick="del('apps',${a.id})">✕</button>`:""}</td></tr>`).join("");
     return `<h1>Applications</h1>
-      <form onsubmit="return addApp(this)"><input name="company" placeholder="Company" required><input name="role" placeholder="Role">
-        <select name="status">${STATUSES.map(s=>`<option>${s}</option>`).join("")}</select><button>Add</button></form>
+      ${store.canEdit?`<form onsubmit="return addApp(this)"><input name="company" placeholder="Company" required><input name="role" placeholder="Role">
+        <select name="status">${STATUSES.map(s=>`<option>${s}</option>`).join("")}</select><button>Add</button></form>`:""}
       <table><tr><th>Date</th><th>Company</th><th>Role</th><th>Status</th><th></th></tr>${rows}</table>`;
   },
   lang(l){
     const x = stats().lang[l];
     const rows = store.data.sessions.filter(s => s.lang === l).reverse().map(s =>
       `<tr><td>${s.date}</td><td>${s.type}</td><td>${s.minutes} min</td><td>${s.score}/5</td><td>${esc(s.note||"")}</td>
-       <td><button class="ghost" onclick="del('sessions',${s.id})">✕</button></td></tr>`).join("");
+       <td>${store.canEdit?`<button class="ghost" onclick="del('sessions',${s.id})">✕</button>`:""}</td></tr>`).join("");
     return `<h1>${LANGS[l]}</h1>
       <div class="grid">${card("Sessions", x.count, "logged")}${card("Practice time", x.mins, "minutes")}${card("Average", x.avg, "self-score out of 5")}</div>
-      <form onsubmit="return addSession(this,'${l}')">
+      ${store.canEdit?`<form onsubmit="return addSession(this,'${l}')">
         <select name="type"><option>call</option><option>interview</option><option>speaking</option><option>writing</option><option>listening</option></select>
         <input name="minutes" type="number" min="1" placeholder="Minutes" required style="width:100px">
         <select name="score">${[1,2,3,4,5].map(n=>`<option>${n}</option>`).join("")}</select>
-        <input name="note" placeholder="What went wrong / well?" style="flex:1"><button>Log</button></form>
+        <input name="note" placeholder="What went wrong / well?" style="flex:1"><button>Log</button></form>`:""}
       <table><tr><th>Date</th><th>Type</th><th>Time</th><th>Score</th><th>Note</th><th></th></tr>${rows}</table>`;
   },
   map(){
     const evs = [...store.data.events, ...store.data.apps.map(a => ({date: a.date, text: `${a.company}: ${a.status}`}))]
       .sort((a, b) => a.date.localeCompare(b.date));
     return `<h1>Carte de parcours</h1><p class="sub">Your timeline. Applications appear automatically.</p>
-      <form onsubmit="return addEvent(this)"><input name="text" placeholder="Milestone" required style="flex:1"><input name="date" type="date"><button>Add</button></form>
+      ${store.canEdit?`<form onsubmit="return addEvent(this)"><input name="text" placeholder="Milestone" required style="flex:1"><input name="date" type="date"><button>Add</button></form>`:""}
       <div class="tl">${evs.map(e => `<div><b>${e.date}</b> — ${esc(e.text)}</div>`).join("")}</div>`;
   }
 };
@@ -149,7 +195,7 @@ const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":
 function addApp(f){ store.add("apps", {company: f.company.value, role: f.role.value, status: f.status.value}); render(); return false; }
 function addSession(f, lang){ store.add("sessions", {lang, type: f.type.value, minutes: +f.minutes.value, score: +f.score.value, note: f.note.value}); render(); return false; }
 function addEvent(f){ const e = {text: f.text.value}; if (f.date.value) e.date = f.date.value; store.add("events", e); render(); return false; }
-function setStatus(id, s){ store.data.apps.find(a => a.id === id).status = s; store.save(); }
+function setStatus(id, s){ store.data.apps.find(a => a.id === id).status = s; store.save(); render(); }
 function del(list, id){ store.del(list, id); render(); }
 
 function render(){
@@ -159,6 +205,12 @@ function render(){
 }
 addEventListener("hashchange", render);
 render();
+store.load().then(render);
+setInterval(async () => {
+  if (store.mode !== "viewer" || document.hidden) return;
+  const before = store.rev; await store.load();
+  if (store.rev !== before) render();
+}, 30000);
 </script>
 </body>
 </html>
