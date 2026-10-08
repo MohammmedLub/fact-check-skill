@@ -24,7 +24,8 @@ export default async (req) => {
     if (!d || !Array.isArray(d.apps) || !Array.isArray(d.sessions) || !Array.isArray(d.events))
       return json({ error: "bad shape" }, 400);
     if (body.rev !== saved.rev) return json({ error: "out of date", ...saved }, 409);
-    const next = { rev: saved.rev + 1, data: { apps: d.apps, sessions: d.sessions, events: d.events } };
+    const goals = d.goals && typeof d.goals === "object" && !Array.isArray(d.goals) ? d.goals : {};
+    const next = { rev: saved.rev + 1, data: { apps: d.apps, sessions: d.sessions, events: d.events, goals } };
     await store.setJSON("state", next);
     return json({ ...next, editor: true });
   }

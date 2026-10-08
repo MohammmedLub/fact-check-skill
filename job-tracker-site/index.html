@@ -66,7 +66,9 @@ const store = {
       local.set(KEY, JSON.stringify(this.data));
     } catch { this.mode = "local"; }
   },
-  async save(){
+  queue: Promise.resolve(),
+  save(){ this.queue = this.queue.then(() => this.push()); return this.queue; },  // one save at a time
+  async push(){
     local.set(KEY, JSON.stringify(this.data));
     if (this.mode !== "editor") return;
     status("Saving…");
@@ -90,24 +92,37 @@ async function unlock(){
 function lock(){ store.key = ""; local.set(KEY + ".key", null); store.mode = "viewer"; render(); }
 
 /* ---------- derived performance numbers (the dashboard reads these) ---------- */
+const TYPES = ["speaking", "listening", "reading", "writing", "call", "interview"];
+const LEVELS = ["A1", "A2", "B1", "B2", "C1", "C2"];
+const INVITED = ["invited", "round 2-5", "offer"];
+const pct = (x, y) => y ? Math.round(100 * x / y) + "%" : "–";
+const avgOf = r => r.length ? r.reduce((t, x) => t + x.score, 0) / r.length : null;
+function weekAgo(){ const d = new Date(); d.setDate(d.getDate() - 6); return d.toISOString().slice(0,10); }
 function stats(){
   const a = store.data.apps, n = a.length;
-  const invited = a.filter(x => ["invited","round 2-5","offer"].includes(x.status)).length;
+  const invited = a.filter(x => INVITED.includes(x.status)).length;
   const rounds = a.filter(x => ["round 2-5","offer"].includes(x.status)).length;
   const offers = a.filter(x => x.status === "offer").length;
-  const pct = (x, y) => y ? Math.round(100 * x / y) + "%" : "–";
-  const lang = {};
+  const lang = {}, since = weekAgo();
   for (const l in LANGS){
     const s = store.data.sessions.filter(x => x.lang === l);
-    const mins = s.reduce((t, x) => t + x.minutes, 0);
-    const avg = s.length ? (s.reduce((t, x) => t + x.score, 0) / s.length).toFixed(1) : "–";
-    const last5 = s.slice(-5), prev5 = s.slice(-10, -5);
-    const m = r => r.length ? r.reduce((t, x) => t + x.score, 0) / r.length : null;
-    const trend = (m(last5) != null && m(prev5) != null) ? (m(last5) - m(prev5)).toFixed(1) : null;
-    lang[l] = {count: s.length, mins, avg, trend};
+    const jobs = a.filter(x => x.lang === l), jobsInv = jobs.filter(x => INVITED.includes(x.status)).length;
+    const m5 = avgOf(s.slice(-5)), p5 = avgOf(s.slice(-10, -5));
+    const goal = (store.data.goals || {})[l] || {};
+    lang[l] = {
+      count: s.length, mins: s.reduce((t, x) => t + x.minutes, 0),
+      avg: s.length ? avgOf(s).toFixed(1) : "–",
+      trend: m5 != null && p5 != null ? (m5 - p5).toFixed(1) : null,
+      week: s.filter(x => x.date >= since).reduce((t, x) => t + x.minutes, 0),
+      goal, jobs: jobs.length, jobsInv, jobRate: pct(jobsInv, jobs.length),
+      byType: TYPES.map(t => { const r = s.filter(x => x.type === t); return {t, n: r.length, mins: r.reduce((u, x) => u + x.minutes, 0), avg: r.length ? avgOf(r).toFixed(1) : "–"}; }).filter(x => x.n)
+    };
   }
   return {n, invited, rounds, offers, inviteRate: pct(invited, n), lang};
 }
+const level = g => g.level ? `${g.level}${g.target ? " → " + g.target : ""}` : "level not set";
+const weekLine = x => x.goal.weekly ? `${x.week} / ${x.goal.weekly} min this week` : `${x.week} min this week`;
+const weekBar = x => x.goal.weekly ? `<div class="bar"><i style="width:${Math.min(100, 100 * x.week / x.goal.weekly)}%"></i></div>` : "";
 
 /* ---------- tabs: hash routing, no new browser tabs ---------- */
 const TABS = [["dash","Job dashboard"], ["nl","Nederlands"], ["fr","Français"], ["en","English"], ["apps","Applications"], ["map","Carte de parcours"]];
@@ -144,9 +159,11 @@ const views = {
     const s = stats();
     const langCards = Object.entries(LANGS).map(([l, name]) => {
       const x = s.lang[l], t = x.trend == null ? "" : ` · trend ${x.trend > 0 ? "+" : ""}${x.trend}`;
-      const w = x.avg === "–" ? 0 : x.avg * 20;
-      return `<div class="card"><div class="k">${name}</div><div class="v">${x.avg}<span class="sub" style="font-size:14px"> / 5</span></div>
-        <div class="n">${x.count} sessions · ${x.mins} min${t} · <a href="#${l}">open tracker →</a></div><div class="bar"><i style="width:${w}%"></i></div></div>`;
+      return `<div class="card"><div class="k">${name} · ${level(x.goal)}</div>
+        <div class="v">${x.avg}<span class="sub" style="font-size:14px"> / 5</span></div>
+        <div class="n">${x.count} sessions${t}</div>
+        <div class="n">${x.jobs} jobs in ${name} · ${x.jobRate} invited</div>
+        <div class="n">${weekLine(x)} · <a href="#${l}">open →</a></div>${weekBar(x)}</div>`;
     }).join("");
     return `<div class="sub">JOB SEARCH</div><h1>Job dashboard</h1>
       <p class="sub">Every number here comes from the other tabs. Log something there and it changes here.</p>
@@ -156,29 +173,47 @@ const views = {
         ${card("Round 2–5", s.rounds, "processes", "#apps")}
         ${card("Offers", s.offers, "received", "#apps")}
       </div>
-      <h3>Language performance</h3><div class="grid">${langCards}</div>`;
+      <h3>Languages</h3><div class="grid">${langCards}</div>`;
   },
   apps(){
     const rows = store.data.apps.slice().reverse().map(a => `<tr><td>${a.date}</td><td>${esc(a.company)}</td><td>${esc(a.role||"")}</td>
+      <td>${a.lang ? `<a href="#${a.lang}" style="color:var(--accent)">${LANGS[a.lang]}</a>` : "–"}</td>
       <td><select ${store.canEdit?"":"disabled"} onchange="setStatus(${a.id}, this.value)">${STATUSES.map(s => `<option ${s===a.status?"selected":""}>${s}</option>`).join("")}</select></td>
       <td>${store.canEdit?`<button class="ghost" onclick="del('apps',${a.id})">✕</button>`:""}</td></tr>`).join("");
     return `<h1>Applications</h1>
       ${store.canEdit?`<form onsubmit="return addApp(this)"><input name="company" placeholder="Company" required><input name="role" placeholder="Role">
+        <select name="lang" title="Working language of the job">${Object.entries(LANGS).map(([k,v])=>`<option value="${k}">${v}</option>`).join("")}</select>
         <select name="status">${STATUSES.map(s=>`<option>${s}</option>`).join("")}</select><button>Add</button></form>`:""}
-      <table><tr><th>Date</th><th>Company</th><th>Role</th><th>Status</th><th></th></tr>${rows}</table>`;
+      <table><tr><th>Date</th><th>Company</th><th>Role</th><th>Language</th><th>Status</th><th></th></tr>${rows}</table>`;
   },
   lang(l){
-    const x = stats().lang[l];
+    const x = stats().lang[l], g = x.goal, t = x.trend == null ? "" : ` · trend ${x.trend > 0 ? "+" : ""}${x.trend}`;
     const rows = store.data.sessions.filter(s => s.lang === l).reverse().map(s =>
       `<tr><td>${s.date}</td><td>${s.type}</td><td>${s.minutes} min</td><td>${s.score}/5</td><td>${esc(s.note||"")}</td>
        <td>${store.canEdit?`<button class="ghost" onclick="del('sessions',${s.id})">✕</button>`:""}</td></tr>`).join("");
+    const jobs = store.data.apps.filter(a => a.lang === l).reverse().map(a =>
+      `<tr><td>${a.date}</td><td>${esc(a.company)}</td><td>${esc(a.role||"")}</td><td>${a.status}</td></tr>`).join("");
+    const skills = x.byType.map(b => `<tr><td>${b.t}</td><td>${b.n}</td><td>${b.mins} min</td><td>${b.avg} / 5</td></tr>`).join("");
+    const lv = (name, cur) => `<select name="${name}"><option value="">–</option>${LEVELS.map(v=>`<option ${v===cur?"selected":""}>${v}</option>`).join("")}</select>`;
     return `<h1>${LANGS[l]}</h1>
-      <div class="grid">${card("Sessions", x.count, "logged")}${card("Practice time", x.mins, "minutes")}${card("Average", x.avg, "self-score out of 5")}</div>
+      <div class="grid">
+        <div class="card"><div class="k">Level</div><div class="v">${g.level||"–"}</div><div class="n">${g.target ? "target " + g.target : "no target set"}</div></div>
+        <div class="card"><div class="k">This week</div><div class="v">${x.week}<span class="sub" style="font-size:14px"> min</span></div><div class="n">${g.weekly ? "goal " + g.weekly + " min" : "no weekly goal"}</div>${weekBar(x)}</div>
+        <div class="card"><div class="k">Average score</div><div class="v">${x.avg}</div><div class="n">${x.count} sessions · ${x.mins} min total${t}</div></div>
+        ${card(`Jobs in ${LANGS[l]}`, x.jobs, `${x.jobsInv} invited (${x.jobRate})`, "#apps")}
+      </div>
+      ${store.canEdit?`<form onsubmit="return setGoal(this,'${l}')"><span class="sub" style="align-self:center">Level</span>${lv("level", g.level)}
+        <span class="sub" style="align-self:center">Target</span>${lv("target", g.target)}
+        <input name="weekly" type="number" min="0" placeholder="Weekly min" value="${g.weekly||""}" style="width:120px"><button class="ghost">Save goal</button></form>`:""}
+      <h3>Log practice</h3>
       ${store.canEdit?`<form onsubmit="return addSession(this,'${l}')">
-        <select name="type"><option>call</option><option>interview</option><option>speaking</option><option>writing</option><option>listening</option></select>
+        <select name="type">${TYPES.map(t=>`<option>${t}</option>`).join("")}</select>
         <input name="minutes" type="number" min="1" placeholder="Minutes" required style="width:100px">
-        <select name="score">${[1,2,3,4,5].map(n=>`<option>${n}</option>`).join("")}</select>
+        <select name="score" title="How well did it go?">${[1,2,3,4,5].map(n=>`<option>${n}</option>`).join("")}</select>
         <input name="note" placeholder="What went wrong / well?" style="flex:1"><button>Log</button></form>`:""}
+      ${skills ? `<h3>By skill</h3><table><tr><th>Skill</th><th>Sessions</th><th>Time</th><th>Average</th></tr>${skills}</table>` : ""}
+      ${jobs ? `<h3>Jobs in ${LANGS[l]}</h3><table><tr><th>Date</th><th>Company</th><th>Role</th><th>Status</th></tr>${jobs}</table>` : ""}
+      <h3>Sessions</h3>
       <table><tr><th>Date</th><th>Type</th><th>Time</th><th>Score</th><th>Note</th><th></th></tr>${rows}</table>`;
   },
   map(){
@@ -192,7 +227,8 @@ const views = {
 
 /* ---------- actions ---------- */
 const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-function addApp(f){ store.add("apps", {company: f.company.value, role: f.role.value, status: f.status.value}); render(); return false; }
+function addApp(f){ store.add("apps", {company: f.company.value, role: f.role.value, lang: f.lang.value, status: f.status.value}); render(); return false; }
+function setGoal(f, l){ store.data.goals = {...store.data.goals, [l]: {level: f.level.value, target: f.target.value, weekly: +f.weekly.value || 0}}; store.save(); render(); return false; }
 function addSession(f, lang){ store.add("sessions", {lang, type: f.type.value, minutes: +f.minutes.value, score: +f.score.value, note: f.note.value}); render(); return false; }
 function addEvent(f){ const e = {text: f.text.value}; if (f.date.value) e.date = f.date.value; store.add("events", e); render(); return false; }
 function setStatus(id, s){ store.data.apps.find(a => a.id === id).status = s; store.save(); render(); }
